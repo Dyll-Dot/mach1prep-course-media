@@ -1,0 +1,52 @@
+name: Ingest media
+# The studio pushes content-hashed files to incoming/<release>; this uploads them as release
+# assets (never kept in Git) and deletes the branch.
+on:
+  push:
+    branches: ['incoming/**']
+permissions:
+  contents: write
+concurrency:
+  group: ingest-media
+  cancel-in-progress: false
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check every file is named by its SHA-256
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(incoming/*)
+          [ "${#files[@]}" -gt 0 ] || { echo "Nothing to ingest"; exit 1; }
+          for f in "${files[@]}"; do
+            n=$(basename "$f"); h="${n%%.*}"; e="${n#*.}"
+            [[ "$h" =~ ^[0-9a-f]{64}$ ]] || { echo "Bad name: $n"; exit 1; }
+            [[ "$e" =~ ^(json|mp3|webp|png|jpg|vtt)$ ]] || { echo "Type not allowed: $n"; exit 1; }
+            [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$h" ] || { echo "Hash mismatch: $n"; exit 1; }
+          done
+          echo "${#files[@]} files verified"
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${BRANCH#incoming/}"
+          [[ "$tag" =~ ^(staging|live)$ ]] || { echo "Unknown release: $tag"; exit 1; }
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            flags=(); [ "$tag" = staging ] && flags=(--prerelease)
+            gh release create "$tag" --target main --title "$tag" "${flags[@]}" \
+              --notes "Content-hashed lesson media ($tag). See README."
+          fi
+          have=$(gh release view "$tag" --json assets -q '.assets[].name')
+          added=0
+          for f in incoming/*; do
+            n=$(basename "$f")
+            if ! grep -qxF "$n" <<<"$have"; then gh release upload "$tag" "$f"; added=$((added+1)); fi
+          done
+          echo "Uploaded $added new files to $tag" >> "$GITHUB_STEP_SUMMARY"
+      - name: Delete the incoming branch
+        run: git push origin --delete "${{ github.ref_name }}"
