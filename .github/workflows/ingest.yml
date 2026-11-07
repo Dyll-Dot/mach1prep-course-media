@@ -1,6 +1,8 @@
 name: Ingest media
 # The studio pushes content-hashed files to incoming/<release>; this uploads them as release
-# assets (never kept in Git) and deletes the branch.
+# assets (never kept in Git) and deletes the branch. Files too big for Git (large FAA handbooks)
+# are listed in incoming/fetch.json instead ([{"name": "<sha256>.pdf", "url": "https://www.faa.gov/..."}]):
+# they are downloaded here from FAA hosts only and must match their SHA-256 name like any other file.
 on:
   push:
     branches: ['incoming/**']
@@ -12,9 +14,23 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch listed FAA files
+        run: |
+          set -euo pipefail
+          [ -f incoming/fetch.json ] || exit 0
+          python3 - <<'PY'
+          import json, re, subprocess
+          for f in json.load(open('incoming/fetch.json')):
+              name, url = f['name'], f['url']
+              assert re.fullmatch(r'[0-9a-f]{64}\.pdf', name), name
+              assert re.match(r'https://(www\.faa\.gov|aeronav\.faa\.gov)/', url), url
+              subprocess.run(['curl', '-fsSL', '--retry', '3', '-A', 'Mozilla/5.0 (mach1prep-course-media)',
+                              '-o', 'incoming/' + name, url], check=True)
+          PY
+          rm incoming/fetch.json
       - name: Check every file is named by its SHA-256
         run: |
           set -euo pipefail
@@ -24,7 +40,7 @@ jobs:
           for f in "${files[@]}"; do
             n=$(basename "$f"); h="${n%%.*}"; e="${n#*.}"
             [[ "$h" =~ ^[0-9a-f]{64}$ ]] || { echo "Bad name: $n"; exit 1; }
-            [[ "$e" =~ ^(json|mp3|webp|png|jpg|vtt)$ ]] || { echo "Type not allowed: $n"; exit 1; }
+            [[ "$e" =~ ^(json|mp3|webp|png|jpg|vtt|pdf)$ ]] || { echo "Type not allowed: $n"; exit 1; }
             [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$h" ] || { echo "Hash mismatch: $n"; exit 1; }
           done
           echo "${#files[@]} files verified"
